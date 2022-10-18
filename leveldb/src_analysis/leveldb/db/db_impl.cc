@@ -507,9 +507,13 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   mutex_.AssertHeld();
   const uint64_t start_micros = env_->NowMicros();
   FileMetaData meta;
+  // 调用BuildTable完成Memtable到SST文件的转换，meta.number是文件要
+  // 使用的number，最终生成的sst文件名为$number.ldb，比如000012.ldb。
   meta.number = versions_->NewFileNumber();
   pending_outputs_.insert(meta.number);
+  //遍历Memtable的迭代器
   Iterator* iter = mem->NewIterator();
+  //写到"LOG"文件中，不是WAL的log文件
   Log(options_.info_log, "Level-0 table #%llu: started",
       (unsigned long long)meta.number);
 
@@ -533,6 +537,9 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     const Slice min_user_key = meta.smallest.user_key();
     const Slice max_user_key = meta.largest.user_key();
     if (base != nullptr) {
+      // 调用PickLevelForMemTableOutput为新的SST文件挑选level，最低放到level 0，
+      // 最高放到level 2。这里还会修改 VersionEdit，添加一个文件记录。包含文件
+      // 的number、size、最大和最小key。
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
     }
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
@@ -546,11 +553,13 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   return s;
 }
 
+// memtable落盘入口
 void DBImpl::CompactMemTable() {
   mutex_.AssertHeld();
   assert(imm_ != nullptr);
 
   // Save the contents of the memtable as a new Table
+  // 调用WriteLevel0Table把Memtable落盘，并在VersionEdit存储新增的文件信息。
   VersionEdit edit;
   Version* base = versions_->current();
   base->Ref();
@@ -565,6 +574,7 @@ void DBImpl::CompactMemTable() {
   if (s.ok()) {
     edit.SetPrevLogNumber(0);
     edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
+    // 调用LogAndApply把VersionEdit的更新应用到LevelDB的版本库。
     s = versions_->LogAndApply(&edit, &mutex_);
   }
 
@@ -573,6 +583,8 @@ void DBImpl::CompactMemTable() {
     imm_->Unref();
     imm_ = nullptr;
     has_imm_.store(false, std::memory_order_release);
+    // 调用RemoveObsoleteFiles删除废弃的文件(比如Memtable的预写日志文件），
+    // RemoveObsoleteFiles会检查数据库下所有的文件，删除废弃的文件。
     RemoveObsoleteFiles();
   } else {
     RecordBackgroundError(s);

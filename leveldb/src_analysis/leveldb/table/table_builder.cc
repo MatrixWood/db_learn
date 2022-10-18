@@ -91,8 +91,14 @@ Status TableBuilder::ChangeOptions(const Options& options) {
   return Status::OK();
 }
 
+// data block是key-value数据的block，一个data block包含成千上万(随便说的)个key-value数据。
+// 每个data block对应一个index_entry，所有index entry组成了index block。
+// 每个data block也对应一个filter block(比如BloomFilter)，不过一个filter block可能对应
+// 多个data block。
 void TableBuilder::Add(const Slice& key, const Slice& value) {
   Rep* r = rep_;
+  // 检查是否存在错误，以及检查本次Add的key是否大于last_key，TableBuilder只接受升序添加key，
+  // 因为这个是为Memtable服务的，所以key必然是升序的。
   assert(!r->closed);
   if (!ok()) return;
   if (r->num_entries > 0) {
@@ -145,8 +151,14 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
   //    crc: uint32
   assert(ok());
   Rep* r = rep_;
+  // 调用BlockBuilder的Finish完成block数据的最终构建，
+  // Finish会在尾部写入key的重启点列表，重启点是帮助多个key共用前缀的，以减少空间占用。
   Slice raw = block->Finish();
 
+  // 根据是否压缩来决定是否对block的数据进行压缩，
+  // 如果需要压缩就调用压缩算法压缩后放到block_contents中，
+  // 反之直接把原始数据赋给block_contents，这里使用Slice作为载体，
+  // 所以不会拷贝完整数据，开销不大
   Slice block_contents;
   CompressionType type = r->options.compression;
   // TODO(postrelease): Support more compression options: zlib?
@@ -169,6 +181,7 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
       break;
     }
   }
+  // 调用WriteRawBlock把block数据写入文件，然后清空compressed_output和block。
   WriteRawBlock(block_contents, type, handle);
   r->compressed_output.clear();
   block->Reset();
@@ -177,10 +190,16 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
 void TableBuilder::WriteRawBlock(const Slice& block_contents,
                                  CompressionType type, BlockHandle* handle) {
   Rep* r = rep_;
+  // 把raw block的offset和size存入handle。
   handle->set_offset(r->offset);
   handle->set_size(block_contents.size());
+  // 把raw block数据写入文件，WritableFile是一个文件操作的抽象类，用于兼容不
+  // 用操作系统的文件IO接口。
   r->status = r->file->Append(block_contents);
   if (r->status.ok()) {
+    // 生成trailer并写入文件，trailer总共5个字节，trailer[0]存储CompressionType，
+    // 用于表示数据是否压缩及压缩类型。trailer[1-4]存储crc校验和，crc校验和是
+    // 基于raw block的数据域和trailer域计算出来的。
     char trailer[kBlockTrailerSize];
     trailer[0] = type;
     uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
@@ -188,6 +207,7 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents,
     EncodeFixed32(trailer + 1, crc32c::Mask(crc));
     r->status = r->file->Append(Slice(trailer, kBlockTrailerSize));
     if (r->status.ok()) {
+      // 把rep_的offset加上数据域size和trailer域size之和，表示文件当前已写入的总size。
       r->offset += block_contents.size() + kBlockTrailerSize;
     }
   }
